@@ -9,11 +9,15 @@
   const clearEl = document.getElementById('clear');
   const exportEl = document.getElementById('export');
   const captureBodiesEl = document.getElementById('captureBodies');
+  const enableDecryptEl = document.getElementById('enableDecrypt');
+  const decryptFnEl = document.getElementById('decryptFn');
+  const applyDecryptEl = document.getElementById('applyDecrypt');
 
   let isPaused = false;
   let allRecords = [];
   let displayedRecords = [];
   let selectedId = null;
+  const pendingByKey = new Map();
 
   function formatBytes(bytes) {
     if (bytes == null) return '';
@@ -178,6 +182,7 @@
 
   function onNewRecord(rec) {
     allRecords.push(rec);
+    tryAttachPlainBodies(rec);
     if (!isPaused) {
       applyFilter();
       if (displayedRecords.length === 1) {
@@ -210,6 +215,15 @@
       a.download = 'network-console.json';
       a.click();
       URL.revokeObjectURL(url);
+    });
+
+    applyDecryptEl.addEventListener('click', () => {
+      // Re-try decrypt on already captured records
+      if (!enableDecryptEl.checked) return;
+      const fnName = decryptFnEl.value.trim();
+      if (!fnName) return;
+      allRecords.forEach((r) => tryDecryptBodies(r, fnName));
+      if (selectedId) selectRecord(selectedId);
     });
   }
 
@@ -268,8 +282,53 @@
         }
       } catch (_) {}
 
+      // Attempt decrypt using a page-provided function
+      tryDecryptBodies(rec, decryptFnEl.value.trim());
+
       onNewRecord(rec);
     });
+  }
+
+  function tryDecryptBodies(rec, fnName) {
+    if (!enableDecryptEl.checked || !fnName) return;
+    // Use inspectedWindow eval to run in page context
+    const evalInPage = (expr) => new Promise((resolve) => {
+      chrome.devtools.inspectedWindow.eval(expr, (res, exc) => {
+        resolve({ res, exc });
+      });
+    });
+
+    const safeArg = (value) => {
+      try {
+        return JSON.stringify(value);
+      } catch (_) {
+        return 'null';
+      }
+    };
+
+    const run = async () => {
+      // decrypt request body if looks like ciphertext
+      if (typeof rec.request.body === 'string' && rec.request.body.length > 0) {
+        const expr = `(function(){try{var fn=window[${JSON.stringify(fnName)}];if(typeof fn!=='function')return null;return fn(${safeArg(rec.request.body)});}catch(e){return null;}})()`;
+        const { res } = await evalInPage(expr);
+        if (res != null) rec.request.decryptedBody = res;
+      }
+      // decrypt response body if looks like ciphertext or if API wraps as {data: ...}
+      const respBody = rec.response?.body;
+      if (respBody != null) {
+        let candidate = null;
+        if (typeof respBody === 'string') candidate = respBody;
+        else if (respBody && typeof respBody === 'object' && 'data' in respBody) candidate = respBody.data;
+        if (candidate != null) {
+          const expr = `(function(){try{var fn=window[${JSON.stringify(fnName)}];if(typeof fn!=='function')return null;return fn(${safeArg(candidate)});}catch(e){return null;}})()`;
+          const { res } = await evalInPage(expr);
+          if (res != null) rec.response.decryptedBody = res;
+        }
+      }
+    };
+
+    // Fire and forget
+    run();
   }
 
   function tryParseJson(text) {
@@ -282,7 +341,156 @@
 
   function init() {
     wireToolbar();
+    ensurePageInstrumentation();
+    startPollingPlainEvents();
     subscribeToNetwork();
+  }
+
+  function ensurePageInstrumentation() {
+    const code = `(function(){
+      if (window.__NC_INSTALLED__) return true;
+      Object.defineProperty(window, '__NC_INSTALLED__', { value: true, configurable: false });
+      window.__NC_EVENTS__ = [];
+      function push(evt){ try{ window.__NC_EVENTS__.push(evt);}catch(e){} }
+      function now(){ return Date.now(); }
+      // Axios interceptors
+      try {
+        var ax = window.axios;
+        if (ax && ax.interceptors) {
+          ax.interceptors.request.use(function(config){
+            try{
+              var url = (config.baseURL||'') + (config.url||'');
+              var body = config.data;
+              if (typeof body === 'string') { try{ body = JSON.parse(body);}catch(_){}}
+              push({ type: 'axios-req', sentAt: now(), method: String((config.method||'GET')).toUpperCase(), url: url, body: body, path: (function(u){ try{var a=new URL(u, location.href); return a.pathname + a.search;}catch(_){return u;} })(url) });
+            }catch(_){ }
+            return config;
+          });
+          ax.interceptors.response.use(function(resp){
+            try{
+              var url = ((resp.config&&resp.config.baseURL)||'') + ((resp.config&&resp.config.url)||'');
+              push({ type: 'axios-res', recvAt: now(), method: String((resp.config&&resp.config.method)||'GET').toUpperCase(), url: url, data: resp && resp.data, path: (function(u){ try{var a=new URL(u, location.href); return a.pathname + a.search;}catch(_){return u;} })(url) });
+            }catch(_){ }
+            return resp;
+          });
+        }
+      } catch(_) {}
+      // fetch wrapper
+      try {
+        var of = window.fetch;
+        if (typeof of === 'function' && !of.__nc_patched) {
+          function parseMaybeJson(t){ try { return JSON.parse(t); } catch(_) { return t; } }
+          var patched = function(input, init){
+            var url = (typeof input==='string' ? input : (input && input.url)) || '';
+            var method = (init && init.method) || (input && input.method) || 'GET';
+            var body = init && init.body;
+            if (typeof body !== 'string' && body != null) { try{ body = JSON.stringify(body);}catch(_){ body = String(body);} }
+            push({ type: 'fetch-req', sentAt: now(), method: String(method).toUpperCase(), url: url, body: body, path: (function(u){ try{var a=new URL(u, location.href); return a.pathname + a.search;}catch(_){return u;} })(url) });
+            return of.apply(this, arguments).then(function(resp){
+              try {
+                var clone = resp.clone();
+                clone.text().then(function(text){
+                  push({ type: 'fetch-res', recvAt: now(), method: String(method).toUpperCase(), url: url, data: parseMaybeJson(text), path: (function(u){ try{var a=new URL(u, location.href); return a.pathname + a.search;}catch(_){return u;} })(url) });
+                });
+              } catch(_) {}
+              return resp;
+            });
+          };
+          patched.__nc_patched = true;
+          window.fetch = patched;
+        }
+      } catch(_) {}
+      // XHR wrapper
+      try {
+        var oOpen = XMLHttpRequest.prototype.open;
+        var oSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function(method, url){ this.__nc_method = method; this.__nc_url = url; return oOpen.apply(this, arguments); };
+        XMLHttpRequest.prototype.send = function(body){
+          var b = body;
+          if (typeof b !== 'string' && b != null) { try { b = JSON.stringify(b); } catch(_) { b = String(b); } }
+          var url = this.__nc_url || '';
+          var method = (this.__nc_method||'GET');
+          push({ type: 'xhr-req', sentAt: now(), method: String(method).toUpperCase(), url: url, body: b, path: (function(u){ try{var a=new URL(u, location.href); return a.pathname + a.search;}catch(_){return u;} })(url) });
+          this.addEventListener('loadend', function(){
+            try {
+              var data = this.response;
+              push({ type: 'xhr-res', recvAt: now(), method: String(method).toUpperCase(), url: url, data: data, path: (function(u){ try{var a=new URL(u, location.href); return a.pathname + a.search;}catch(_){return u;} })(url) });
+            } catch(_) {}
+          });
+          return oSend.apply(this, arguments);
+        };
+      } catch(_) {}
+      return true;
+    })();`;
+    chrome.devtools.inspectedWindow.eval(code, function () {});
+  }
+
+  function startPollingPlainEvents() {
+    setInterval(() => {
+      chrome.devtools.inspectedWindow.eval(`(function(){ var ev = window.__NC_EVENTS__||[]; window.__NC_EVENTS__=[]; return ev; })()`, (events) => {
+        if (!Array.isArray(events) || events.length === 0) return;
+        ingestPlainEvents(events);
+        // Try to attach to recent records
+        const start = Math.max(0, allRecords.length - 50);
+        for (let i = start; i < allRecords.length; i++) {
+          tryAttachPlainBodies(allRecords[i]);
+        }
+        if (selectedId) selectRecord(selectedId);
+      });
+    }, 500);
+  }
+
+  function ingestPlainEvents(events) {
+    for (const e of events) {
+      const method = String(e.method || '').toUpperCase();
+      const keyFull = method + ' ' + String(e.url || '');
+      const keyPath = method + ' ' + String(e.path || '');
+      const keys = [keyFull, keyPath];
+      for (const k of keys) {
+        if (!pendingByKey.has(k)) pendingByKey.set(k, { reqs: [], ress: [] });
+        const bucket = pendingByKey.get(k);
+        if (e.type.endsWith('req')) bucket.reqs.push(e);
+        else if (e.type.endsWith('res')) bucket.ress.push(e);
+      }
+    }
+  }
+
+  function tryAttachPlainBodies(rec) {
+    const method = String(rec.request.method || '').toUpperCase();
+    const url = String(rec.request.url || '');
+    const path = extractPath(url);
+    const keys = [method + ' ' + url, method + ' ' + path];
+    for (const k of keys) {
+      const bucket = pendingByKey.get(k);
+      if (!bucket) continue;
+      // Attach request body: select the nearest sentAt before or around start time
+      if (rec.request.plainBody == null && bucket.reqs.length) {
+        const started = rec.startedDateTime ? new Date(rec.startedDateTime).getTime() : undefined;
+        let best = null;
+        if (started != null) {
+          let bestDiff = Infinity;
+          for (const e of bucket.reqs) {
+            const diff = Math.abs((e.sentAt || 0) - started);
+            if (diff < bestDiff) { bestDiff = diff; best = e; }
+          }
+        } else {
+          best = bucket.reqs[0];
+        }
+        if (best) rec.request.plainBody = tryParseJson(best.body);
+      }
+      // Attach response body
+      if (rec.response && rec.response.plainBody == null && bucket.ress.length) {
+        let best = bucket.ress[0];
+        rec.response.plainBody = tryParseJson(best.data);
+      }
+      // Optionally clean up to prevent unbounded growth
+      if (bucket.reqs.length > 1000) bucket.reqs.splice(0, 800);
+      if (bucket.ress.length > 1000) bucket.ress.splice(0, 800);
+    }
+  }
+
+  function extractPath(u) {
+    try { const a = new URL(u); return a.pathname + a.search; } catch (_) { return u; }
   }
 
   init();
