@@ -1,0 +1,177 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Network Console</title>
+    <style>
+      :root {
+        --bg: #0b0f14;
+        --panel: #10151c;
+        --text: #e6edf3;
+        --muted: #9fb0c0;
+        --accent: #2f81f7;
+        --border: #1f2a37;
+        --danger: #e5534b;
+        --success: #3fb950;
+        --warning: #d29922;
+      }
+      html, body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+        font-size: 12px;
+      }
+      .toolbar {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 8px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+      }
+      .toolbar input[type="text"] {
+        background: #0e1621;
+        color: var(--text);
+        border: 1px solid var(--border);
+        padding: 6px 8px;
+        border-radius: 6px;
+        flex: 1;
+      }
+      .toolbar button, .toolbar select, .toolbar label {
+        background: #0e1621;
+        color: var(--text);
+        border: 1px solid var(--border);
+        padding: 6px 10px;
+        border-radius: 6px;
+      }
+      .toolbar button:hover {
+        border-color: var(--accent);
+      }
+      .split {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        height: calc(100% - 50px);
+      }
+      .left, .right {
+        height: 100%;
+        overflow: hidden;
+      }
+      .table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      .table thead {
+        position: sticky;
+        top: 0;
+        background: var(--panel);
+        z-index: 1;
+      }
+      th, td {
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      tr:hover {
+        background: #0e1621;
+      }
+      tr.active {
+        background: rgba(47, 129, 247, 0.15);
+      }
+      .right {
+        border-left: 1px solid var(--border);
+        display: grid;
+        grid-template-rows: auto 1fr;
+      }
+      .tabs {
+        display: flex;
+        gap: 8px;
+        padding: 8px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+      }
+      .tabs button {
+        background: transparent;
+        border: none;
+        color: var(--muted);
+        padding: 6px 8px;
+        cursor: pointer;
+      }
+      .tabs button.active {
+        color: var(--text);
+        border-bottom: 2px solid var(--accent);
+      }
+      pre {
+        margin: 0;
+        padding: 10px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .status {
+        font-weight: 600;
+      }
+      .status.ok { color: var(--success); }
+      .status.warn { color: var(--warning); }
+      .status.err { color: var(--danger); }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <button id="toggle">Pause</button>
+      <button id="clear">Clear</button>
+      <input id="filter" type="text" placeholder="Filter by URL, method, status, type..." />
+      <select id="method">
+        <option value="">All methods</option>
+        <option>GET</option>
+        <option>POST</option>
+        <option>PUT</option>
+        <option>PATCH</option>
+        <option>DELETE</option>
+        <option>OPTIONS</option>
+        <option>HEAD</option>
+      </select>
+      <label>
+        <input id="captureBodies" type="checkbox" checked /> Bodies
+      </label>
+      <button id="export">Export JSON</button>
+    </div>
+    <div class="split">
+      <div class="left">
+        <table class="table" id="table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Method</th>
+              <th>URL</th>
+              <th>Status</th>
+              <th>Type</th>
+              <th>Time (ms)</th>
+              <th>Size</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="right">
+        <div class="tabs">
+          <button data-tab="overview" class="active">Overview</button>
+          <button data-tab="request">Request</button>
+          <button data-tab="response">Response</button>
+          <button data-tab="headers">Headers</button>
+          <button data-tab="timing">Timing</button>
+        </div>
+        <div id="pane" style="overflow:auto"></div>
+      </div>
+    </div>
+    <script src="panel.js"></script>
+  </body>
+  
+</html>
+
+
